@@ -23,8 +23,10 @@ import { triggerHaptic } from '@/lib/haptics'
 import { cn } from '@/lib/utils'
 import {
   $composerAttachments,
+  $composerDraft,
   clearComposerAttachments,
-  type ComposerAttachment
+  type ComposerAttachment,
+  reconcileComposerTerminalSelections
 } from '@/store/composer'
 import {
   $queuedPromptsBySession,
@@ -216,16 +218,10 @@ export function ChatBar({
     }
   }, [appendExternalText, disabled])
 
-  // Keep draftRef in sync with the assistant-ui composer state for callers
-  // that read the latest text outside the React render cycle. We don't push
-  // to `$composerDraft` per keystroke any more — nobody outside the composer
-  // subscribes to it (verified by grep), and the round-trip
-  // `setText` ⇄ `subscribe` ⇄ `setText` was adding two useEffects to the per-
-  // keystroke critical path. `reconcileComposerTerminalSelections` only
-  // matters when the draft is submitted; we now call it from the submit
-  // path instead.
   useEffect(() => {
     draftRef.current = draft
+    $composerDraft.set(draft)
+    reconcileComposerTerminalSelections(draft)
 
     const editor = editorRef.current
 
@@ -234,20 +230,22 @@ export function ChatBar({
     }
   }, [draft])
 
+  useEffect(
+    () =>
+      $composerDraft.subscribe(value => {
+        if (value !== draftRef.current) {
+          aui.composer().setText(value)
+        }
+      }),
+    [aui]
+  )
+
   useEffect(() => {
     if (urlOpen) {
       window.requestAnimationFrame(() => urlInputRef.current?.focus({ preventScroll: true }))
     }
   }, [urlOpen])
 
-  // Track expansion via cheap heuristics (newline or length threshold) instead
-  // of reading editor.scrollHeight on every keystroke. scrollHeight forces a
-  // synchronous layout flush — measured at 2.27 layouts per character typed
-  // (see scripts/leak-typing.mjs). With ~30 chars before a typical wrap on
-  // composer-default-width, this heuristic flips at roughly the right time
-  // and the user only notices if they type far past the wrap boundary
-  // without a newline; in that case the ResizeObserver below catches it via
-  // a height delta and we still expand.
   useEffect(() => {
     if (!draft) {
       setExpanded(false)
@@ -259,21 +257,12 @@ export function ChatBar({
       return
     }
 
-    if (draft.includes('\n') || draft.length > 60) {
+    const wraps = (editorRef.current?.scrollHeight ?? 0) > 56
+
+    if (draft.includes('\n') || wraps) {
       setExpanded(true)
     }
   }, [draft, expanded])
-
-  // Bucket measured heights so we only invalidate the global CSS var when
-  // the size crosses a meaningful threshold. Without bucketing, the editor
-  // grows ~1px per character → setProperty fires every keystroke → entire
-  // tree's computed style is invalidated → next paint forces a full
-  // recalculate-style pass. With an 8px bucket, the invalidation rate drops
-  // ~8× and small char-by-char typing produces no style invalidation at all
-  // until a wrap or row change actually happens.
-  const lastBucketedHeightRef = useRef(0)
-  const lastBucketedSurfaceHeightRef = useRef(0)
-  const lastTightRef = useRef<boolean | null>(null)
 
   const syncComposerMetrics = useCallback(() => {
     const composer = composerRef.current
@@ -287,30 +276,15 @@ export function ChatBar({
     const root = document.documentElement
 
     if (width > 0) {
-      const nextTight = width < COMPOSER_STACK_BREAKPOINT_PX
-
-      if (nextTight !== lastTightRef.current) {
-        lastTightRef.current = nextTight
-        setTight(nextTight)
-      }
+      setTight(width < COMPOSER_STACK_BREAKPOINT_PX)
     }
 
     if (height > 0) {
-      const bucket = Math.round(height / 8) * 8
-
-      if (bucket !== lastBucketedHeightRef.current) {
-        lastBucketedHeightRef.current = bucket
-        root.style.setProperty('--composer-measured-height', `${bucket}px`)
-      }
+      root.style.setProperty('--composer-measured-height', `${Math.round(height)}px`)
     }
 
     if (surfaceHeight && surfaceHeight > 0) {
-      const bucket = Math.round(surfaceHeight / 8) * 8
-
-      if (bucket !== lastBucketedSurfaceHeightRef.current) {
-        lastBucketedSurfaceHeightRef.current = bucket
-        root.style.setProperty('--composer-surface-measured-height', `${bucket}px`)
-      }
+      root.style.setProperty('--composer-surface-measured-height', `${Math.round(surfaceHeight)}px`)
     }
   }, [])
 
@@ -407,28 +381,12 @@ export function ChatBar({
       return
     }
 
-    // Fast-bail: if neither `@` nor `/` appears in the current draft, there's
-    // nothing for `detectTrigger` to match. Skip the DOM range walk inside
-    // `textBeforeCaret` (which calls `range.toString()`, O(n) over the draft)
-    // and the regex pass that follows. Only when a relevant char is present
-    // do we pay the cost.
-    const text = composerPlainText(editor)
-
-    if (!text.includes('@') && !text.includes('/')) {
-      if (trigger) {
-        setTrigger(null)
-        setTriggerActive(0)
-      }
-
-      return
-    }
-
     const before = textBeforeCaret(editor)
-    const detected = detectTrigger(before ?? text)
+    const detected = detectTrigger(before ?? composerPlainText(editor))
 
     setTrigger(detected)
     setTriggerActive(0)
-  }, [trigger])
+  }, [])
 
   const handleEditorInput = (event: FormEvent<HTMLDivElement>) => {
     const editor = event.currentTarget
@@ -1032,24 +990,7 @@ export function ChatBar({
         role="textbox"
         suppressContentEditableWarning
       />
-      {/* assistant-ui requires ComposerPrimitive.Input somewhere in the tree
-        so the composer-state binding (text + IME + paste + form-submit hookup)
-        wires up. We render the real input UI ourselves above via the
-        contentEditable, so the primitive is invisible (sr-only).
-
-        IMPORTANT: don't let it render its default <TextareaAutosize>. That
-        component runs `useLayoutEffect(resizeTextarea)` on every value change
-        and reads `node.scrollHeight` against a hidden measurement textarea,
-        forcing two synchronous layouts per keystroke for an element the
-        user can't see. Profiling 400-char synthetic typing showed >900ms
-        cumulative cost in getHeight2/calculateNodeHeight alone (~2.3ms/key)
-        on top of the per-keystroke React commit.
-
-        `asChild` swaps TextareaAutosize for a Radix Slot wrapping our
-        plain <textarea>, which carries the binding but skips autosize. */}
-      <ComposerPrimitive.Input asChild tabIndex={-1} unstable_focusOnScrollToBottom={false}>
-        <textarea aria-hidden className="sr-only" tabIndex={-1} />
-      </ComposerPrimitive.Input>
+      <ComposerPrimitive.Input className="sr-only" tabIndex={-1} unstable_focusOnScrollToBottom={false} />
     </div>
   )
 
