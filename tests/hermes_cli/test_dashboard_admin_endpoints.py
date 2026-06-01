@@ -279,6 +279,38 @@ class TestSystemStatsEndpoint:
         assert "psutil" in s
 
 
+class TestCuratorEndpoints:
+    @pytest.fixture(autouse=True)
+    def _setup(self, _isolate_hermes_home):
+        self.client, _ = _client()
+
+    def test_status_and_pause_toggle(self):
+        r = self.client.get("/api/curator")
+        assert r.status_code == 200
+        body = r.json()
+        assert {"enabled", "paused", "interval_hours"} <= set(body)
+        # Pause then resume; the read reflects the write.
+        r = self.client.put("/api/curator/paused", json={"paused": True})
+        assert r.status_code == 200 and r.json()["paused"] is True
+        assert self.client.get("/api/curator").json()["paused"] is True
+        r = self.client.put("/api/curator/paused", json={"paused": False})
+        assert r.status_code == 200 and r.json()["paused"] is False
+
+
+class TestPortalEndpoint:
+    @pytest.fixture(autouse=True)
+    def _setup(self, _isolate_hermes_home):
+        self.client, _ = _client()
+
+    def test_status_shape(self):
+        r = self.client.get("/api/portal")
+        assert r.status_code == 200
+        body = r.json()
+        assert {"logged_in", "features", "subscription_url", "provider"} <= set(body)
+        assert isinstance(body["features"], list)
+
+
+
 class TestWebhookToggleEndpoint:
     @pytest.fixture(autouse=True)
     def _setup(self, _isolate_hermes_home):
@@ -329,6 +361,9 @@ class TestAdminEndpointsAuthGate:
             "/api/memory",
             "/api/ops/hooks",
             "/api/ops/checkpoints",
+            "/api/curator",
+            "/api/portal",
+            "/api/system/stats",
         ],
     )
     def test_gated(self, path):

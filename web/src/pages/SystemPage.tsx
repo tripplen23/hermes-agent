@@ -4,6 +4,7 @@ import {
   Brain,
   Cpu,
   Database,
+  Globe,
   HardDrive,
   KeyRound,
   Play,
@@ -12,6 +13,7 @@ import {
   RotateCw,
   Server,
   ShieldCheck,
+  Sparkles,
   Stethoscope,
   Terminal,
   Trash2,
@@ -40,6 +42,8 @@ import type {
   HooksResponse,
   HookEntry,
   SystemStats,
+  CuratorStatus,
+  PortalStatus,
 } from "@/lib/api";
 
 function formatBytes(n: number): string {
@@ -143,6 +147,8 @@ export default function SystemPage() {
     null,
   );
   const [hooks, setHooks] = useState<HooksResponse | null>(null);
+  const [curator, setCurator] = useState<CuratorStatus | null>(null);
+  const [portal, setPortal] = useState<PortalStatus | null>(null);
   const [loading, setLoading] = useState(true);
 
   const [activeAction, setActiveAction] = useState<string | null>(null);
@@ -177,14 +183,18 @@ export default function SystemPage() {
       api.getCredentialPool(),
       api.getCheckpoints(),
       api.getHooks(),
+      api.getCurator(),
+      api.getPortal(),
     ])
-      .then(([s, st, m, p, c, h]) => {
+      .then(([s, st, m, p, c, h, cur, prt]) => {
         if (s.status === "fulfilled") setStatus(s.value);
         if (st.status === "fulfilled") setStats(st.value);
         if (m.status === "fulfilled") setMemory(m.value);
         if (p.status === "fulfilled") setPool(p.value.providers);
         if (c.status === "fulfilled") setCheckpoints(c.value);
         if (h.status === "fulfilled") setHooks(h.value);
+        if (cur.status === "fulfilled") setCurator(cur.value);
+        if (prt.status === "fulfilled") setPortal(prt.value);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -210,6 +220,18 @@ export default function SystemPage() {
       setTimeout(loadAll, 3000);
     } catch (e) {
       showToast(`Gateway ${verb} failed: ${e}`, "error");
+    }
+  };
+
+  // ── Curator ────────────────────────────────────────────────────────
+  const toggleCuratorPaused = async () => {
+    if (!curator) return;
+    try {
+      await api.setCuratorPaused(!curator.paused);
+      showToast(curator.paused ? "Curator resumed" : "Curator paused", "success");
+      loadAll();
+    } catch (e) {
+      showToast(`Curator toggle failed: ${e}`, "error");
     }
   };
 
@@ -590,6 +612,86 @@ export default function SystemPage() {
         </Card>
       </section>
 
+      {/* ── Portal ────────────────────────────────────────────────── */}
+      <section className="flex flex-col gap-3">
+        <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+          <Globe className="h-4 w-4" /> Nous Portal
+        </H2>
+        <Card>
+          <CardContent className="flex flex-col gap-3 py-4">
+            <div className="flex items-center gap-3">
+              <Badge tone={portal?.logged_in ? "success" : "secondary"}>
+                {portal?.logged_in ? "logged in" : "not logged in"}
+              </Badge>
+              {portal?.provider && (
+                <span className="text-sm text-muted-foreground">
+                  inference provider: {portal.provider}
+                </span>
+              )}
+              <a
+                href={portal?.subscription_url || "https://portal.nousresearch.com/manage-subscription"}
+                target="_blank"
+                rel="noreferrer"
+                className="ml-auto text-xs text-primary underline"
+              >
+                Manage subscription
+              </a>
+            </div>
+            {portal?.features && portal.features.length > 0 && (
+              <div className="flex flex-col gap-1 border-t border-border pt-3">
+                <span className="text-xs uppercase tracking-wider text-muted-foreground">
+                  Tool Gateway routing
+                </span>
+                {portal.features.map((f) => (
+                  <div key={f.label} className="flex items-center justify-between text-sm">
+                    <span>{f.label}</span>
+                    <span className="text-muted-foreground">{f.state}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!portal?.logged_in && (
+              <p className="text-xs text-muted-foreground">
+                Log in with <span className="font-mono">hermes auth add nous --type oauth</span>.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* ── Curator ───────────────────────────────────────────────── */}
+      <section className="flex flex-col gap-3">
+        <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
+          <Sparkles className="h-4 w-4" /> Skill curator
+        </H2>
+        <Card>
+          <CardContent className="flex items-center justify-between py-4">
+            <div className="flex items-center gap-3">
+              <Badge tone={curator?.paused ? "warning" : curator?.enabled ? "success" : "secondary"}>
+                {curator?.paused ? "paused" : curator?.enabled ? "active" : "disabled"}
+              </Badge>
+              <span className="text-sm text-muted-foreground">
+                {curator?.interval_hours ? `every ${curator.interval_hours}h` : ""}
+                {curator?.last_run_at ? ` · last run ${new Date(curator.last_run_at).toLocaleString()}` : " · never run"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <Button size="sm" ghost onClick={toggleCuratorPaused}>
+                {curator?.paused ? "Resume" : "Pause"}
+              </Button>
+              <Button
+                size="sm"
+                ghost
+                prefix={<Play className="h-3.5 w-3.5" />}
+                onClick={() => runOp(api.runCurator, "Curator review")}
+              >
+                Run now
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
       {/* ── Gateway ───────────────────────────────────────────────── */}
       <section className="flex flex-col gap-3">
         <H2 variant="sm" className="flex items-center gap-2 text-muted-foreground">
@@ -759,6 +861,15 @@ export default function SystemPage() {
             </Button>
             <Button size="sm" ghost prefix={<RotateCw className="h-3.5 w-3.5" />} onClick={() => runOp(api.updateSkillsFromHub, "Skills update")}>
               Update skills
+            </Button>
+            <Button size="sm" ghost prefix={<Activity className="h-3.5 w-3.5" />} onClick={() => runOp(api.runPromptSize, "Prompt size")}>
+              Prompt size
+            </Button>
+            <Button size="sm" ghost prefix={<Database className="h-3.5 w-3.5" />} onClick={() => runOp(api.runDump, "Support dump")}>
+              Support dump
+            </Button>
+            <Button size="sm" ghost prefix={<RotateCw className="h-3.5 w-3.5" />} onClick={() => runOp(api.runConfigMigrate, "Config migrate")}>
+              Migrate config
             </Button>
           </CardContent>
         </Card>

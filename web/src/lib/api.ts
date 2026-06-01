@@ -668,6 +668,28 @@ export const api = {
     }),
   getSystemStats: () => fetchJSON<SystemStats>("/api/system/stats"),
 
+  // ── Admin: Curator ──────────────────────────────────────────────────
+  getCurator: () => fetchJSON<CuratorStatus>("/api/curator"),
+  setCuratorPaused: (paused: boolean) =>
+    fetchJSON<{ ok: boolean; paused: boolean }>("/api/curator/paused", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paused }),
+    }),
+  runCurator: () =>
+    fetchJSON<ActionResponse>("/api/curator/run", { method: "POST" }),
+
+  // ── Admin: Portal ───────────────────────────────────────────────────
+  getPortal: () => fetchJSON<PortalStatus>("/api/portal"),
+
+  // ── Admin: Diagnostics (backgrounded) ───────────────────────────────
+  runPromptSize: () =>
+    fetchJSON<ActionResponse>("/api/ops/prompt-size", { method: "POST" }),
+  runDump: () => fetchJSON<ActionResponse>("/api/ops/dump", { method: "POST" }),
+  runConfigMigrate: () =>
+    fetchJSON<ActionResponse>("/api/ops/config-migrate", { method: "POST" }),
+
+
   getCheckpoints: () => fetchJSON<CheckpointsResponse>("/api/ops/checkpoints"),
   pruneCheckpoints: () =>
     fetchJSON<ActionResponse>("/api/ops/checkpoints/prune", { method: "POST" }),
@@ -878,6 +900,30 @@ export interface SystemStats {
   memory?: { total: number; available: number; used: number; percent: number };
   disk?: { total: number; used: number; free: number; percent: number };
   process?: { pid: number; rss: number; create_time: number; num_threads: number };
+}
+
+export interface CuratorStatus {
+  enabled: boolean;
+  paused: boolean;
+  interval_hours: number | null;
+  last_run_at: string | null;
+  min_idle_hours: number | null;
+  stale_after_days: number | null;
+  archive_after_days: number | null;
+}
+
+export interface PortalFeature {
+  label: string;
+  state: string;
+}
+
+export interface PortalStatus {
+  logged_in: boolean;
+  portal_url: string | null;
+  inference_url: string | null;
+  provider: string;
+  subscription_url: string;
+  features: PortalFeature[];
 }
 
 export interface CheckpointSession {
