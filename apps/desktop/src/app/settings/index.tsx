@@ -100,7 +100,7 @@ export function SettingsView({ gateway, onClose, onConfigSaved, onMainModelChang
             onClick={() => setActiveView('providers')}
           />
           {activeView === 'providers' && (
-            <div className="ml-3.5 flex flex-col gap-0.5 border-l border-border/30 pl-1.5">
+            <div className="ml-3.5 flex flex-col gap-0.5 pl-1.5">
               <OverlayNavItem
                 active={providerView === 'accounts'}
                 icon={Sparkles}

@@ -11,7 +11,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { listOAuthProviders } from '@/hermes'
-import { ChevronDown, ExternalLink, Loader2, Save, Sparkles, Trash2 } from '@/lib/icons'
+import { ChevronDown, ExternalLink, KeyRound, Loader2, Save, Trash2 } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 import { $desktopOnboarding, startManualProviderOAuth } from '@/store/onboarding'
 import type { EnvVarInfo, OAuthProvider } from '@/types/hermes'
@@ -113,7 +113,7 @@ function KeyField({
       )}
       <div className="flex items-center gap-2">
         <Input
-          className="h-8 min-w-0 flex-1 font-mono text-[0.6875rem] md:text-[0.6875rem]"
+          className="h-8 min-w-0 flex-1 font-mono text-[0.75rem]"
           onChange={e => setEdits(c => ({ ...c, [varKey]: e.target.value }))}
           onKeyDown={e => {
             if (e.key === 'Enter' && dirty) {
@@ -153,12 +153,13 @@ function ProviderKeyCard({
   const hasOptions = group.advanced.length > 0
 
   return (
-    <div className="rounded-xl border border-(--ui-stroke-tertiary) bg-(--ui-bg-tertiary)/20">
-      <div className="flex flex-wrap items-start gap-x-4 gap-y-2 p-3">
+    <div className="rounded-[6px] px-2 py-2 transition-colors hover:bg-(--ui-control-hover-background)">
+      <div className="flex flex-wrap items-start gap-x-4 gap-y-2">
         <div className="flex min-w-44 flex-1 flex-col gap-0.5">
           <button
             className={cn('flex items-center gap-2 text-left', hasOptions ? 'cursor-pointer' : 'cursor-default')}
-            onClick={() => hasOptions && onToggle()}
+            disabled={!hasOptions}
+            onClick={onToggle}
             type="button"
           >
             <span
@@ -204,7 +205,7 @@ function ProviderKeyCard({
         </div>
       </div>
       {hasOptions && expanded && (
-        <div className="grid gap-3 border-t border-(--ui-stroke-tertiary) p-3">
+        <div className="mt-2 grid gap-2 pl-4">
           {group.advanced.map(([key, info]) => (
             <KeyField
               info={info}
@@ -250,14 +251,15 @@ function OAuthPicker({ onWantApiKey, providers }: { onWantApiKey: () => void; pr
   return (
     <section className="mb-5 grid gap-2">
       <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-        <SettingsCategoryHeading icon={Sparkles} title="Connect an account" />
-        <button
-          className="text-[length:var(--conversation-caption-font-size)] font-medium text-muted-foreground transition hover:text-foreground"
+        <SettingsCategoryHeading icon={KeyRound} title="Connect an account" />
+        <Button
+          className="h-auto px-0 py-0 text-[length:var(--conversation-caption-font-size)]"
           onClick={onWantApiKey}
           type="button"
+          variant="textStrong"
         >
           Have an API key instead?
-        </button>
+        </Button>
       </div>
       <p className="-mt-2 mb-1 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">
         Sign in with a subscription — no API key to copy. Hermes runs the browser sign-in for you, right here in the
@@ -283,14 +285,15 @@ function OAuthPicker({ onWantApiKey, providers }: { onWantApiKey: () => void; pr
         </>
       )}
       {collapsible && (
-        <button
-          className="flex items-center justify-center gap-1.5 pt-1 text-[length:var(--conversation-caption-font-size)] font-medium text-muted-foreground transition hover:text-foreground"
+        <Button
+          className="h-auto px-0 py-1 text-[length:var(--conversation-caption-font-size)]"
           onClick={() => setShowAll(v => !v)}
           type="button"
+          variant="text"
         >
           {showAll ? 'Collapse' : connected.length > 0 ? 'Connect another provider' : 'Other providers'}
           <ChevronDown className={cn('size-3.5 transition', showAll && 'rotate-180')} />
-        </button>
+        </Button>
       )}
     </section>
   )
@@ -298,7 +301,7 @@ function OAuthPicker({ onWantApiKey, providers }: { onWantApiKey: () => void; pr
 
 function NoProviderKeys() {
   return (
-    <div className="rounded-lg border border-dashed border-(--ui-stroke-tertiary) px-4 py-8 text-center text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
+    <div className="grid min-h-32 place-items-center px-4 py-8 text-center text-[length:var(--conversation-caption-font-size)] text-muted-foreground">
       No provider API keys available.
     </div>
   )
