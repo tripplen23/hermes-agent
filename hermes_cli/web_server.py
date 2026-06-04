@@ -608,6 +608,39 @@ class ModelAssignment(BaseModel):
     provider: str
     model: str
     task: str = ""
+    # Optional OpenAI-compatible endpoint URL. Only honored for custom/local
+    # providers on the main slot — lets the GUI configure a self-hosted endpoint
+    # (vLLM, llama.cpp, Ollama, …) that needs no API key. The runtime resolver
+    # reads model.base_url from config (it ignores OPENAI_BASE_URL), so this is
+    # the path that actually wires a local endpoint into resolution.
+    base_url: str = ""
+
+
+def _apply_main_model_assignment(
+    model_cfg: "Any", provider: str, model: str, base_url: str = ""
+) -> dict:
+    """Apply a main-slot model assignment to a ``model`` config dict in place.
+
+    Sets ``provider``/``default``, then reconciles ``base_url``: custom/local
+    providers persist the supplied endpoint URL (the runtime resolver reads
+    ``model.base_url`` from config and ignores ``OPENAI_BASE_URL``), while every
+    other provider clears any stale URL so the resolver picks that provider's
+    own default endpoint. The hardcoded ``context_length`` override is always
+    dropped since the new model may have a different context window.
+
+    Returns the same dict (coerced to a fresh dict if the input wasn't one) so
+    callers can assign it straight back onto ``cfg["model"]``.
+    """
+    if not isinstance(model_cfg, dict):
+        model_cfg = {}
+    model_cfg["provider"] = provider
+    model_cfg["default"] = model
+    if provider.strip().lower() == "custom" and base_url.strip():
+        model_cfg["base_url"] = base_url.strip()
+    elif model_cfg.get("base_url"):
+        model_cfg["base_url"] = ""
+    model_cfg.pop("context_length", None)
+    return model_cfg
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -1008,6 +1041,51 @@ async def run_config_migrate():
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed: {exc}")
     return {"ok": True, "pid": proc.pid, "name": "config-migrate"}
+
+
+class DebugShareRequest(BaseModel):
+    # Redaction is ON by default — force-mode scrubs credential-shaped tokens
+    # out of log content before it leaves the machine. The toggle exists so an
+    # operator who knows the logs are clean can opt out for fuller fidelity.
+    redact: bool = True
+    # Recent log lines included in the summary tail (full logs are separate).
+    lines: int = 200
+
+
+@app.post("/api/ops/debug-share")
+async def run_debug_share_endpoint(body: DebugShareRequest | None = None):
+    """Upload a redacted debug report + full logs and return the paste URLs.
+
+    Unlike the other diagnostics actions (doctor, dump, prompt-size) this is
+    *synchronous*: the whole point of ``debug share`` is the set of shareable
+    URLs it produces, so we run the upload in a worker thread and return the
+    structured ``{urls, failures, redacted, ...}`` payload directly. The
+    dashboard renders those as real, copyable links instead of scraping a log
+    tail. Pastes auto-delete after 6 hours (handled inside the share core).
+    """
+    from hermes_cli.debug import build_debug_share
+
+    req = body or DebugShareRequest()
+    try:
+        result = await asyncio.to_thread(
+            build_debug_share,
+            log_lines=max(1, min(int(req.lines), 5000)),
+            redact=bool(req.redact),
+        )
+    except RuntimeError as exc:
+        # Required summary-report upload failed (offline / paste service down).
+        raise HTTPException(status_code=502, detail=f"Upload failed: {exc}")
+    except Exception as exc:
+        _log.exception("debug share failed")
+        raise HTTPException(status_code=500, detail=f"Failed: {exc}")
+
+    return {
+        "ok": True,
+        "urls": result.urls,
+        "failures": result.failures,
+        "redacted": result.redacted,
+        "auto_delete_seconds": result.auto_delete_seconds,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1954,6 +2032,7 @@ async def set_model_assignment(body: ModelAssignment):
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
     task = (body.task or "").strip().lower()
+    base_url = (body.base_url or "").strip()
 
     if scope not in {"main", "auxiliary"}:
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
@@ -1964,18 +2043,9 @@ async def set_model_assignment(body: ModelAssignment):
         if scope == "main":
             if not provider or not model:
                 raise HTTPException(status_code=400, detail="provider and model required for main")
-            model_cfg = cfg.get("model", {})
-            if not isinstance(model_cfg, dict):
-                model_cfg = {}
-            model_cfg["provider"] = provider
-            model_cfg["default"] = model
-            # Clear stale base_url so the resolver picks the provider's own default.
-            if "base_url" in model_cfg and model_cfg.get("base_url"):
-                model_cfg["base_url"] = ""
-            # Also clear hardcoded context_length override — new model may have
-            # a different context window.
-            if "context_length" in model_cfg:
-                model_cfg.pop("context_length", None)
+            model_cfg = _apply_main_model_assignment(
+                cfg.get("model", {}), provider, model, base_url
+            )
             cfg["model"] = model_cfg
 
             # When switching the main provider to Nous, mirror the CLI's
@@ -2013,6 +2083,7 @@ async def set_model_assignment(body: ModelAssignment):
                 "scope": "main",
                 "provider": provider,
                 "model": model,
+                "base_url": model_cfg.get("base_url", ""),
                 "gateway_tools": gateway_tools,
             }
 
@@ -2181,6 +2252,33 @@ _CREDENTIAL_PROBES: dict[str, tuple[str, str]] = {
 }
 
 
+def _parse_model_ids(resp: "Any") -> List[str]:
+    """Extract model ids from an OpenAI-compatible ``/v1/models`` response.
+
+    Tolerant of the common shapes: ``{"data": [{"id": ...}]}`` (OpenAI / vLLM /
+    llama.cpp) and a bare ``{"data": ["id", ...]}``. Returns ``[]`` on any
+    parse/HTTP error so a slightly non-standard endpoint never hard-blocks.
+    """
+    try:
+        if not resp.is_success:
+            return []
+        payload = resp.json()
+    except Exception:
+        return []
+    data = payload.get("data") if isinstance(payload, dict) else payload
+    if not isinstance(data, list):
+        return []
+    ids: List[str] = []
+    for item in data:
+        if isinstance(item, dict):
+            mid = str(item.get("id") or "").strip()
+        else:
+            mid = str(item or "").strip()
+        if mid:
+            ids.append(mid)
+    return ids
+
+
 @app.post("/api/providers/validate")
 async def validate_provider_credential(body: EnvVarUpdate, request: Request):
     """Live-probe a provider credential before it's saved.
@@ -2199,13 +2297,15 @@ async def validate_provider_credential(body: EnvVarUpdate, request: Request):
         return {"ok": False, "reachable": True, "message": "Enter a value first."}
 
     # Local / custom endpoint: validate connectivity, not auth — any HTTP
-    # response (even 401) proves the endpoint is up.
+    # response (even 401) proves the endpoint is up. Also surface the model
+    # ids the endpoint advertises (OpenAI ``/v1/models`` shape) so the GUI can
+    # auto-pick a default without asking the user to type a model name.
     if key == "OPENAI_BASE_URL":
         url = value.rstrip("/") + "/models"
         try:
             with httpx.Client(timeout=httpx.Timeout(8.0)) as client:
-                client.get(url)
-            return {"ok": True, "reachable": True, "message": ""}
+                resp = client.get(url)
+            return {"ok": True, "reachable": True, "message": "", "models": _parse_model_ids(resp)}
         except Exception:
             return {"ok": False, "reachable": False, "message": f"Could not reach {url}."}
 
@@ -3100,22 +3200,6 @@ def _claude_code_only_status() -> Dict[str, Any]:
 # to a third-party CLI like Claude Code or Qwen).
 _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     {
-        "id": "anthropic",
-        "name": "Anthropic (Claude API)",
-        "flow": "pkce",
-        "cli_command": "hermes auth add anthropic",
-        "docs_url": "https://docs.claude.com/en/api/getting-started",
-        "status_fn": _anthropic_oauth_status,
-    },
-    {
-        "id": "claude-code",
-        "name": "Claude Code (subscription)",
-        "flow": "external",
-        "cli_command": "claude setup-token",
-        "docs_url": "https://docs.claude.com/en/docs/claude-code",
-        "status_fn": _claude_code_only_status,
-    },
-    {
         "id": "nous",
         "name": "Nous Portal",
         "flow": "device_code",
@@ -3125,7 +3209,7 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
     },
     {
         "id": "openai-codex",
-        "name": "OpenAI Codex (ChatGPT)",
+        "name": "OpenAI OAuth (ChatGPT)",
         "flow": "device_code",
         "cli_command": "hermes auth add openai-codex",
         "docs_url": "https://platform.openai.com/docs",
@@ -3162,6 +3246,25 @@ _OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
         "cli_command": "hermes auth add xai-oauth",
         "docs_url": "https://hermes-agent.nousresearch.com/docs/guides/xai-grok-oauth",
         "status_fn": None,  # dispatched via auth.get_xai_oauth_auth_status
+    },
+    # ── Anthropic / Claude entries sit at the bottom: the API-key path
+    # first, then the subscription OAuth path (which only works with extra
+    # usage credits on top of a Claude Max plan — see disclaimer in name).
+    {
+        "id": "anthropic",
+        "name": "Anthropic API Key",
+        "flow": "pkce",
+        "cli_command": "hermes auth add anthropic",
+        "docs_url": "https://docs.claude.com/en/api/getting-started",
+        "status_fn": _anthropic_oauth_status,
+    },
+    {
+        "id": "claude-code",
+        "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
+        "flow": "external",
+        "cli_command": "claude setup-token",
+        "docs_url": "https://docs.claude.com/en/docs/claude-code",
+        "status_fn": _claude_code_only_status,
     },
 )
 
@@ -6190,15 +6293,7 @@ def _write_profile_model(profile_dir: Path, provider: str, model: str) -> None:
     token = set_hermes_home_override(str(profile_dir))
     try:
         cfg = load_config()
-        model_cfg = cfg.get("model", {})
-        if not isinstance(model_cfg, dict):
-            model_cfg = {}
-        model_cfg["provider"] = provider
-        model_cfg["default"] = model
-        if model_cfg.get("base_url"):
-            model_cfg["base_url"] = ""
-        model_cfg.pop("context_length", None)
-        cfg["model"] = model_cfg
+        cfg["model"] = _apply_main_model_assignment(cfg.get("model", {}), provider, model)
         save_config(cfg)
     finally:
         reset_hermes_home_override(token)

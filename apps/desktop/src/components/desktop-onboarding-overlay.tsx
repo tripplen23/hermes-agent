@@ -23,13 +23,14 @@ import { $desktopBoot, type DesktopBootState } from '@/store/boot'
 import {
   $desktopOnboarding,
   cancelOnboardingFlow,
+  clearPendingProviderOAuth,
   closeManualOnboarding,
   confirmOnboardingModel,
-  consumePendingProviderOAuth,
   copyDeviceCode,
   copyExternalCommand,
   type OnboardingContext,
   type OnboardingFlow,
+  peekPendingProviderOAuth,
   recheckExternalSignin,
   refreshOnboarding,
   saveOnboardingApiKey,
@@ -56,8 +57,6 @@ export interface ApiKeyOption {
   placeholder?: string
   short?: string
 }
-
-const MIN_KEY_LENGTH = 8
 
 const API_KEY_OPTIONS: ApiKeyOption[] = [
   {
@@ -105,12 +104,14 @@ const API_KEY_OPTIONS: ApiKeyOption[] = [
 
 const PROVIDER_DISPLAY: Record<string, { order: number; title: string }> = {
   nous: { order: 0, title: 'Nous Portal' },
-  anthropic: { order: 1, title: 'Anthropic Claude' },
-  'openai-codex': { order: 2, title: 'OpenAI Codex / ChatGPT' },
-  'minimax-oauth': { order: 3, title: 'MiniMax' },
+  'openai-codex': { order: 1, title: 'OpenAI OAuth (ChatGPT)' },
+  'minimax-oauth': { order: 2, title: 'MiniMax' },
+  'qwen-oauth': { order: 3, title: 'Qwen Code' },
   'xai-oauth': { order: 4, title: 'xAI Grok' },
-  'claude-code': { order: 5, title: 'Claude Code' },
-  'qwen-oauth': { order: 6, title: 'Qwen Code' }
+  // Both Anthropic entries sit at the bottom: the API-key path first, then
+  // the subscription OAuth path (only works with extra usage credits).
+  anthropic: { order: 5, title: 'Anthropic API Key' },
+  'claude-code': { order: 6, title: 'Anthropic OAuth: Required Extra Usage Credits to Use Subscription' }
 }
 
 const assetPath = (path: string) => `${import.meta.env.BASE_URL}${path.replace(/^\/+/, '')}`
@@ -157,7 +158,7 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
       return
     }
 
-    const pendingId = consumePendingProviderOAuth()
+    const pendingId = peekPendingProviderOAuth()
 
     if (!pendingId) {
       return
@@ -166,7 +167,15 @@ export function DesktopOnboardingOverlay({ enabled, onCompleted, requestGateway 
     const provider = onboarding.providers.find(p => p.id === pendingId)
 
     if (provider) {
+      // Only clear once we've committed to launching it, so a failed/empty
+      // provider fetch doesn't silently drop the hand-off.
+      clearPendingProviderOAuth()
       void startProviderOAuth(provider, ctx)
+    } else if (onboarding.providers.length > 0) {
+      // The list loaded but the id isn't a real provider — drop the stale
+      // hand-off. An empty list means the fetch isn't ready yet, so keep it
+      // and let a later refresh retry.
+      clearPendingProviderOAuth()
     }
   }, [ctx, onboarding.flow.status, onboarding.manual, onboarding.providers])
 
@@ -456,7 +465,6 @@ export function ProviderRow({
 // surfaces render the identical form.
 export function ApiKeyForm({
   canGoBack,
-  collapseAfter,
   isSet,
   onBack,
   onClear,
@@ -465,9 +473,6 @@ export function ApiKeyForm({
   redactedValue
 }: {
   canGoBack: boolean
-  // When set, the card grid is capped at this many providers behind a
-  // "Show all" toggle so the entry field stays near the top (less scrolling).
-  collapseAfter?: number
   isSet?: (envKey: string) => boolean
   onBack: () => void
   onClear?: (envKey: string) => void
@@ -479,7 +484,6 @@ export function ApiKeyForm({
   const [value, setValue] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<null | string>(null)
-  const [expanded, setExpanded] = useState(false)
   // `options` can change at runtime when callers filter the catalog (e.g. the
   // Providers page wiring its search into this grid). Keep the selection valid
   // by snapping back to the first remaining option when the current one drops.
@@ -505,24 +509,14 @@ export function ApiKeyForm({
     })
   }
 
-  const collapsible = collapseAfter != null && options.length > collapseAfter
-  const collapsed = collapsible && !expanded
-  // Keep the grid short when collapsed, but never hide the selected card —
-  // append it if the user picked something past the cutoff before collapsing.
-  const visibleOptions = !collapsed
-    ? options
-    : (() => {
-        const head = options.slice(0, collapseAfter)
-
-        return head.some(o => o.id === option.id) ? head : [...head, option]
-      })()
-
   const isLocal = option.envKey === 'OPENAI_BASE_URL'
   const alreadySet = isSet?.(option.envKey) ?? false
   // When set, surface the backend's redacted value (e.g. "sk-12…wxyz") as the
   // placeholder so users can eyeball that the right key is in place.
   const currentRedacted = alreadySet ? (redactedValue?.(option.envKey) ?? null) : null
-  const canSave = value.trim().length >= (isLocal ? 1 : MIN_KEY_LENGTH)
+  // Only require a non-empty value — no length/format validation, so a short
+  // or unusual key can't block the user from continuing.
+  const canSave = value.trim().length >= 1
 
   const submit = async () => {
     if (!canSave || saving) {
@@ -556,7 +550,7 @@ export function ApiKeyForm({
       ) : null}
 
       <div className="grid gap-2 sm:grid-cols-2">
-        {visibleOptions.map(o => (
+        {options.map(o => (
           <button
             className={cn(
               'rounded-2xl border bg-background/60 p-3 text-left transition hover:bg-accent/50',
@@ -578,17 +572,6 @@ export function ApiKeyForm({
           </button>
         ))}
       </div>
-
-      {collapsible ? (
-        <button
-          className="-mt-1 flex items-center justify-center gap-1.5 text-xs font-medium text-muted-foreground transition hover:text-foreground"
-          onClick={() => setExpanded(v => !v)}
-          type="button"
-        >
-          {expanded ? 'Show fewer' : `Show all ${options.length} providers`}
-          <ChevronDown className={cn('size-3.5 transition', expanded && 'rotate-180')} />
-        </button>
-      ) : null}
 
       <div className="grid scroll-mt-4 gap-2" ref={entryRef}>
         <div className="flex items-center justify-between gap-3">
