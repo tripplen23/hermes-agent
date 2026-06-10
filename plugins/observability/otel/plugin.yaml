@@ -1,0 +1,12 @@
+name: otel
+version: "1.0.0"
+description: "Optional OpenTelemetry trace export for Hermes — pushes session, model, tool, and cron spans to any OTLP/HTTP collector. Opt in with `hermes plugins enable observability/otel`."
+hooks:
+  - on_session_start
+  - on_session_end
+  - on_session_finalize
+  - on_session_reset
+  - post_api_request
+  - api_request_error
+  - post_tool_call
+entry: plugins.observability.otel

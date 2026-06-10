@@ -299,6 +299,8 @@ def finalize_turn(
                 user_message=original_user_message,
                 assistant_response=final_response,
                 conversation_history=list(messages),
+                parent_session_id=getattr(agent, "_parent_session_id", None) or "",
+                resume_from=getattr(agent, "_parent_session_id", None) or "",
                 model=agent.model,
                 platform=getattr(agent, "platform", None) or "",
             )

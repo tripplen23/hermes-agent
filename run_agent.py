@@ -576,7 +576,10 @@ class AIAgent:
             start_context = {
                 "old_session_id": old_session_id,
                 "carry_over_context": carry_over_context,
+                "parent_session_id": getattr(self, "_parent_session_id", None) or "",
+                "resume_from": getattr(self, "_parent_session_id", None) or "",
                 "platform": getattr(self, "platform", None) or os.environ.get("HERMES_SESSION_SOURCE", "cli"),
+                "provider": getattr(self, "provider", None) or "",
                 "model": getattr(self, "model", ""),
                 "context_length": getattr(engine, "context_length", None),
                 "conversation_id": getattr(self, "_gateway_session_key", None),

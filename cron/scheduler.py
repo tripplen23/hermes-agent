@@ -1579,6 +1579,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
     # This env var is process-wide and persists for the lifetime of the
     # scheduler process — every job this process runs is a cron job.
     os.environ["HERMES_CRON_SESSION"] = "1"
+    _prior_cron_job_id = os.environ.get("HERMES_CRON_JOB_ID")
+    os.environ["HERMES_CRON_JOB_ID"] = str(job_id)
 
     # Use ContextVars for per-job session/delivery state so parallel jobs
     # don't clobber each other's targets (os.environ is process-global).
@@ -2050,6 +2052,13 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             cleanup_stale_async_clients()
         except Exception as e:
             logger.debug("Job '%s': failed to reap stale auxiliary clients: %s", job_id, e)
+
+        # Restore prior HERMES_CRON_JOB_ID so nested/sequential jobs don't
+        # bleed job IDs into unrelated runs.
+        if _prior_cron_job_id is not None:
+            os.environ["HERMES_CRON_JOB_ID"] = _prior_cron_job_id
+        else:
+            os.environ.pop("HERMES_CRON_JOB_ID", None)
 
 
 def tick(verbose: bool = True, adapters=None, loop=None, sync: bool = True) -> int:
